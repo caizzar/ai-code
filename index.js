@@ -1,75 +1,69 @@
 require("dotenv").config();
-const Anthropic = require("@anthropic-ai/sdk");
 const { Octokit } = require("@octokit/rest");
 
-const {
-  ANTHROPIC_API_KEY,
-  GITHUB_TOKEN,
-  GITHUB_OWNER,
-  GITHUB_REPO,
-} = process.env;
+const { DEEPSEEK_API_KEY, GITHUB_TOKEN, REPO_OWNER, REPO_NAME, PR_NUMBER } = process.env;
 
-if (!ANTHROPIC_API_KEY || !GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
-  console.error(
-    "Missing required env vars. Copy .env.example to .env and fill in: " +
-      "ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO"
-  );
-  process.exit(1);
-}
-
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-async function fetchPullRequestDiff(pullNumber) {
-  const { data } = await octokit.pulls.get({
-    owner: GITHUB_OWNER,
-    repo: GITHUB_REPO,
-    pull_number: pullNumber,
+async function run() {
+  const owner = REPO_OWNER;
+  const repo = REPO_NAME;
+  const pr = parseInt(PR_NUMBER);
+
+  const { data: diff } = await octokit.pulls.get({
+    owner, repo, pull_number: pr,
     mediaType: { format: "diff" },
   });
-  return data;
-}
 
-async function reviewDiff(diff) {
-  const response = await anthropic.messages.create({
-    model: "claude-opus-4-7",
-    max_tokens: 2048,
-    system:
-      "You are a senior code reviewer. Given a unified diff, return concise, " +
-      "actionable feedback: bugs, security issues, and clear improvements. " +
-      "Skip nitpicks. Reference file paths and line numbers when possible.",
-    messages: [
-      {
-        role: "user",
-        content: `Review the following pull request diff:\n\n${diff}`,
-      },
-    ],
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [
+        { role: "system", content: `You are a senior engineer doing a thorough code review. For each issue found, output a JSON array: [{"severity":"critical"|"warning"|"info"|"security","file":"filename","line":null,"title":"short title","detail":"explanation"}]. Return ONLY the JSON array, no markdown, no backticks.` },
+        { role: "user", content: `Review this diff:\n\n${String(diff).slice(0, 8000)}` }
+      ],
+    }),
   });
 
-  return response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n");
-}
+  const data = await response.json();
+  console.log("DeepSeek response:", JSON.stringify(data, null, 2));
 
-async function main() {
-  const pullNumber = Number(process.argv[2]);
-  if (!pullNumber) {
-    console.error("Usage: node index.js <pull_request_number>");
-    process.exit(1);
+  if (!data.choices || !data.choices[0]) {
+    throw new Error("No response from DeepSeek: " + JSON.stringify(data));
   }
 
-  console.log(`Fetching PR #${pullNumber} from ${GITHUB_OWNER}/${GITHUB_REPO}...`);
-  const diff = await fetchPullRequestDiff(pullNumber);
+  let issues;
+  try {
+    const text = data.choices[0].message.content.replace(/```json|```/g, "").trim();
+    issues = JSON.parse(text);
+  } catch(e) {
+    issues = [{ severity: "info", file: "general", line: null, title: "Review complete", detail: data.choices[0].message.content }];
+  }
 
-  console.log("Sending to Claude for review...\n");
-  const review = await reviewDiff(diff);
+  const counts = { critical:0, warning:0, info:0, security:0 };
+  issues.forEach(i => counts[i.severity]++);
 
-  console.log("--- Review ---\n");
-  console.log(review);
+  const badges = [
+    counts.critical ? `🔴 **${counts.critical} critical**` : null,
+    counts.security ? `🔐 **${counts.security} security**` : null,
+    counts.warning  ? `🟡 ${counts.warning} warning`       : null,
+    counts.info     ? `🔵 ${counts.info} info`             : null,
+  ].filter(Boolean).join("  ·  ");
+
+  const sections = issues.map(i => {
+    const icon = {critical:"🔴",warning:"🟡",info:"🔵",security:"🔐"}[i.severity] || "🔵";
+    return `### ${icon} ${i.title}\n**\`${i.file}${i.line ? `:${i.line}` : ""}\`**\n\n${i.detail}`;
+  }).join("\n\n---\n\n");
+
+  const body = `## AI Code Review — DeepSeek\n\n${badges}\n\n---\n\n${sections}\n\n---\n*Powered by DeepSeek AI*`;
+
+  await octokit.issues.createComment({ owner, repo, issue_number: pr, body });
+  console.log(`Done — ${issues.length} issues posted.`);
 }
 
-main().catch((err) => {
-  console.error("Error:", err.message);
-  process.exit(1);
-});
+run().catch(err => { console.error(err); process.exit(1); });
