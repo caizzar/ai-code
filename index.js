@@ -24,23 +24,27 @@ async function run() {
     body: JSON.stringify({
       model: "deepseek-chat",
       messages: [
-        {
-          role: "system",
-          content: `You are a senior engineer doing a thorough code review.
-For each issue found, output a JSON array of objects with this shape:
-{"severity":"critical"|"warning"|"info"|"security","file":"<filename>","line":<number or null>,"title":"<short title>","detail":"<explanation and fix>"}
-Return ONLY the JSON array. No prose, no markdown fences.`
-        },
-        {
-          role: "user",
-          content: `Review this diff:\n\n${diff}`
-        }
+        { role: "system", content: `You are a senior engineer doing a thorough code review. For each issue found, output a JSON array: [{"severity":"critical"|"warning"|"info"|"security","file":"filename","line":null,"title":"short title","detail":"explanation"}]. Return ONLY the JSON array, no markdown, no backticks.` },
+        { role: "user", content: `Review this diff:\n\n${String(diff).slice(0, 8000)}` }
       ],
     }),
   });
 
   const data = await response.json();
-  const issues = JSON.parse(data.choices[0].message.content);
+  console.log("DeepSeek response:", JSON.stringify(data, null, 2));
+
+  if (!data.choices || !data.choices[0]) {
+    throw new Error("No response from DeepSeek: " + JSON.stringify(data));
+  }
+
+  let issues;
+  try {
+    const text = data.choices[0].message.content.replace(/```json|```/g, "").trim();
+    issues = JSON.parse(text);
+  } catch(e) {
+    issues = [{ severity: "info", file: "general", line: null, title: "Review complete", detail: data.choices[0].message.content }];
+  }
+
   const counts = { critical:0, warning:0, info:0, security:0 };
   issues.forEach(i => counts[i.severity]++);
 
@@ -52,7 +56,7 @@ Return ONLY the JSON array. No prose, no markdown fences.`
   ].filter(Boolean).join("  ·  ");
 
   const sections = issues.map(i => {
-    const icon = {critical:"🔴",warning:"🟡",info:"🔵",security:"🔐"}[i.severity];
+    const icon = {critical:"🔴",warning:"🟡",info:"🔵",security:"🔐"}[i.severity] || "🔵";
     return `### ${icon} ${i.title}\n**\`${i.file}${i.line ? `:${i.line}` : ""}\`**\n\n${i.detail}`;
   }).join("\n\n---\n\n");
 
