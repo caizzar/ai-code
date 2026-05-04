@@ -1,0 +1,18 @@
+{
+  "name": "ai-code-reviewer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "review": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.92.0",
+    "@octokit/rest": "^22.0.1",
+    "dotenv": "^17.4.2"
+  }
+}
